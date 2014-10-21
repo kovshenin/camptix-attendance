@@ -7,11 +7,28 @@ class CampTix_Attendance extends CampTix_Addon {
 	 * Runs during CampTix init.
 	 */
 	public function camptix_init() {
+		global $camptix;
+
+		// Admin Settings UI.
+		if ( current_user_can( $camptix->caps['manage_options'] ) ) {
+			add_filter( 'camptix_setup_sections', array( $this, 'setup_sections' ) );
+			add_action( 'camptix_menu_setup_controls', array( $this, 'setup_controls' ), 10, 1 );
+			add_filter( 'camptix_validate_options', array( $this, 'validate_options' ), 10, 2 );
+		}
+
+		$camptix_options = $camptix->get_options();
+		if ( empty( $camptix_options['attendance-secret'] ) )
+			return;
+
+		$this->secret = $camptix_options['attendance-secret'];
+
+		if ( empty( $camptix_options['attendance-enabled'] ) )
+			return;
+
 		add_filter( 'wp_ajax_camptix-attendance', array( $this, 'ajax_callback' ) );
 		add_filter( 'wp_ajax_nopriv_camptix-attendance', array( $this, 'ajax_callback' ) );
 
-		$this->secret_key = 'foo'; // Yes, change this please
-		if ( ! empty( $_GET['camptix-attendance'] ) && $_GET['camptix-attendance'] == $this->secret_key ) {
+		if ( ! empty( $_GET['camptix-attendance'] ) && $_GET['camptix-attendance'] == $this->secret ) {
 			add_filter( 'template_include', array( $this, 'setup_attendance_ui' ) );
 		}
 	}
@@ -41,7 +58,7 @@ class CampTix_Attendance extends CampTix_Addon {
 	 * on the requested CampTix action. Also validates keys.
 	 */
 	public function ajax_callback() {
-		if ( empty( $_REQUEST['camptix_secret'] ) || $_REQUEST['camptix_secret'] != $this->secret_key )
+		if ( empty( $_REQUEST['camptix_secret'] ) || $_REQUEST['camptix_secret'] != $this->secret )
 			return;
 
 		$action = $_REQUEST['camptix_action'];
@@ -69,8 +86,10 @@ class CampTix_Attendance extends CampTix_Addon {
 
 		if ( isset( $_REQUEST['camptix_set_attendance'] ) ) {
 			if ( 'true' == $_REQUEST['camptix_set_attendance'] ) {
+				$this->log( 'Marked attendee as attended.', $attendee->ID );
 				update_post_meta( $attendee->ID, 'tix_attended', true );
 			} else {
+				$this->log( 'Marked attendee as did not attended.', $attendee->ID );
 				delete_post_meta( $attendee->ID, 'tix_attended' );
 			}
 		}
@@ -226,6 +245,74 @@ class CampTix_Attendance extends CampTix_Addon {
 	}
 
 	/**
+	 * Add a new section to the Setup screen.
+	 */
+	public function setup_sections( $sections ) {
+		$sections['attendance-ui'] = __( 'Attendance UI', 'camptix' );
+		return $sections;
+	}
+
+	/**
+	 * Add some controls to our Setup section.
+	 */
+	public function setup_controls( $section ) {
+		global $camptix;
+
+		if ( 'attendance-ui' != $section )
+			return;
+
+		add_settings_section( 'general', __( 'Attendance UI', 'camptix' ), array( $this, 'setup_controls_section' ), 'camptix_options' );
+
+		// Fields
+		$camptix->add_settings_field_helper( 'attendance-enabled', __( 'Enabled', 'camptix' ), 'field_yesno', 'general',
+			__( "Don't forget to disable the UI after the event is over.", 'camptix' )
+		);
+
+		add_settings_field( 'attendance-secret', __( 'Secret Link' ), array( $this, 'field_secret' ), 'camptix_options', 'general' );
+	}
+
+	/**
+	 * Secret Link Field
+	 *
+	 * This is a field that only shows the secret URL, and also has
+	 * a "generate" checkbox that allows users to generate a new secret.
+	 */
+	public function field_secret() {
+		$secret_url = ! empty( $this->secret ) ? add_query_arg( 'camptix-attendance', $this->secret, home_url() ) : '';
+		?>
+		<input type="hidden" name="camptix_options[attendance-secret]" value="1" />
+		<textarea class="large-text" rows="4" disabled="disabled"><?php echo esc_textarea( $secret_url ); ?></textarea>
+
+		<input id="camptix-attendance-generate" type="checkbox" name="camptix_options[attendance-generate]" value="1" />
+		<label for="camptix-attendance-generate"><?php _e( 'Generate a new secret link (old links will expire)', 'camptix' ); ?></label>
+		<?php
+	}
+
+	/**
+	 * Setup section description.
+	 */
+	public function setup_controls_section() {
+		?>
+		<p>The Attendance UI addon is useful for tracking attendance at the event. It allows registration volunteers to access a mobile-friendly UI during the event, and mark attendees as "attended" or "did not attend" as they register. The UI also offers live search and filters for your convenience.</p>
+
+		<p><strong>Note</strong>: Anyone with the secret link can access the attendance UI and change attendance data. Please keep this URL secret and change it if necessary.</p>
+		<?php
+	}
+
+	/**
+	 * Runs whenever the CampTix option is updated.
+	 */
+	public function validate_options( $output, $input ) {
+		if ( isset( $input['attendance-enabled'] ) )
+			$output['attendance-enabled'] = (bool) $input['attendance-enabled'];
+
+		if ( ! empty( $input['attendance-generate'] ) )
+			$output['attendance-secret'] = wp_generate_password( 32, false, false );
+
+		return $output;
+	}
+
+	/**
 	 * Get CampTix Tickets
 	 *
 	 * Returns an array of published tickets registered with CampTix.
@@ -241,6 +328,14 @@ class CampTix_Attendance extends CampTix_Addon {
 		) );
 
 		return $this->tickets;
+	}
+
+	/**
+	 * Write a log entry to CampTix.
+	 */
+	public function log( $message, $post_id = 0, $data = null ) {
+		global $camptix;
+		$camptix->log( $message, $post_id, $data, 'attendance' );
 	}
 
 	/**
